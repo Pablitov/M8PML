@@ -1,0 +1,169 @@
+---
+title: "Data Science - Module 8 PML - Project Assignment"
+author: "Pablo Terán"
+date: "13 de diciembre de 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 0. Executive summary
+
+This is an R HTML document. When you click the <b>Knit HTML</b> button a web page will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+Start loading the "training"" and "test"" datasets for this project: 
+
+
+# 1. Preprocessing
+## 1.1. Load libraries and data
+```{r }
+library(ggplot2); library(htmltools); library(caret); library(randomForest);
+library(forecast); library(caret); library(rpart)
+
+ini_seed = 12345; set.seed(ini_seed)            # Set seed for reproducibility
+
+setwd("C:/Users/MNP/Documents/R/Module 8 PML")
+if (!file.exists("pml-training.csv")){
+  urlTR<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+  download.file(urlTR,"pml-training.csv")}
+if (!file.exists("pml-training.csv")){
+  urlTS<- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+  download.file(urlTS,"pml-testing.csv")}
+
+TR<-read.csv("pml-training.csv")
+VAL<-read.csv("pml-testing.csv")
+varnames<-names(TR); nvars<-dim(TR)[2]
+```
+
+## 1.2 Cleaning the data sets
+
+### 1.2.1 Remove NAs
+```{r }
+sum(is.na(TR)); sum(is.na(VAL)) # This gives the number of NAs on each dataset
+
+# Let's see the % of NAs in each column
+naTR<-apply(TR,1,is.na);  nnaTR<-as.numeric(apply(naTR,1,sum)/dim(naTR)[2])
+naVAL<-apply(VAL,1,is.na); nnaVAL<-as.numeric(apply(naVAL,1,sum)/dim(naVAL)[2])
+
+# we will only consider variables that have a percentage of NAs is greater than 50% in both datasets.
+goodVAL<-nnaVAL<0.5; goodTR<-nnaTR<0.5; goodboth<-as.logical(goodVAL*goodTR)
+
+# We can verify that when NAs are present in a variable, it is really abundant (97.93%), so we'll remove directly those variables
+goodboth<-seq(1:length(goodboth))[goodboth]
+
+# Now we can filter out variables from the two datasets and check the number of NAs is zero
+TR<-TR[,goodboth]; sum(is.na(TR)) ##2
+VAL<-VAL[,goodboth]; sum(is.na(VAL))
+# Let's take a look at the varnames that are ok:
+varnames[goodboth]
+```
+
+### 1.2.2 Verify which class the dataset variables belong to. As we'll see corresponding variables in the two dataseVAL are given a different class.
+
+```{r }
+vartypeTR<-as.character(lapply(TR,"class"))  # provides an array of characters with the class for each variable
+vartypeVAL<-as.character(lapply(VAL,"class"))
+coinc<-vartypeTR==vartypeVAL  # This provides the variables that are the same
+vartypeTR[!coinc]; vartypeVAL[!coinc] # See the class of the TR and VAL variables that do not coincide with Testing
+# And so we see that the VAL dataset has lots of logical variables that are considered numbers in the TR dataset
+names(VAL[,!coinc]); names(TR[,!coinc])
+# So there are three variables that don't have the same class. We coerce the variables in TS to be the same type as TR. 
+ind<-seq(1:dim(TR)[2])[!coinc]
+for (i in 1:3){
+  j<-ind[i]; VAL[,j]<-as.numeric(VAL[,j])
+}
+```
+
+### 1.2.3. It is worth noticing that the first sevel columns of both datasets are not needed. Remove them:
+
+```{r }
+nvars<-dim(TR)[2]
+TR<-TR[,8:nvars]; VAL<-VAL[,8:nvars] #3
+varnames<-varnames[8:nvars]
+```
+
+### 1.2.4. We are left with 53 variables, but they are still too many. So we'll try to get rid of variables having little variance<
+
+```{r }
+varslowvar <- nearZeroVar(TR, saveMetrics = TRUE)
+# The following command gives the number of variables with little variance
+sum(varslowvar$zeroVar)
+# We cannot disregard any variables as none of them has little variance. Let's also see what variables are highly correlated
+CM<-abs(cor(TR[,-dim(TR)[2]]))
+# Remove the diagonal cause the correlation with itself is 1
+diag(CM)<-0
+# Store the variables with correlation coeficient >0.7 in a matrix
+correlated_vars<- which(CM>0.7,arr.ind=T)
+# The following plot will show the indecees of the highly correlated variables.
+plot(correlated_vars[,1],correlated_vars[,2])
+# And the number of correlations is:
+dim(correlated_vars)[1]/2
+# So we can conclude that a Principal Component Analysis could help reducing the size of the dataset
+```
+
+# 2. Model fitting
+Now it's time to fit a model and make a prediction of the outcome of the test dataset. Cross validation is required so we will run 10 iterations, splitting the TR set to 70%-30% (training/testing). For comparison purposes, we will fit three different models, one of them with cross validation, and illustrate how results may differ.
+
+## Model 1. Random Forest with principal components
+
+```{r }
+# Datasets are preprocessed to perform a Principal Component Analysis
+pcs<-prcomp(TR[,-53]); spcs<-summary(pcs)
+# Let's plot the Cumulative proportion of variance of the Principal to see how many of them we need to consider 95% of the variance
+plot(spcs$importance[3,],xlab='Variable index',ylab='Accumulated variance')
+# From the cumulative proportion we can see that the first nine PCs account for more than 95% of the variance. Let's pre-process
+pr<-preProcess(TR[,-53],method="pca",pcaComp=9)
+# now we transform the TR and VAL datasets into its principal components
+TRpc<-predict(pr,TR[,-53])
+VALpc<-predict(pr,VAL[,-53])
+# Fit the model
+RFmdl1<-randomForest(TR$classe~., data = TRpc)
+```
+
+## Model 2. RF with the complete dataset TR 
+With this model we predict on the VAl dataset
+```{r }
+RFmdl2<-randomForest(TR$classe~., data = TR)
+```
+
+## Model 3. RF with cross validation and principal components
+```{r }
+# ---------------------------------------------------------------------------------------
+# Cross validation is established via train control
+TC <- trainControl(method = "cv", number = 5, verboseIter=FALSE, preProcOptions="pca", allowParallel=TRUE)
+RFmdl3<-train(classe ~., data = TR, trControl=TC, method = "rf")  # Random Forest
+```
+
+# 3. Prediction
+
+Finally, we will use our models to predict the outcome for the VAL dataset and check the accuracy. let's obtain the results first
+
+```{r }
+rmdl1<-predict(RFmdl1,VALpc); res<-as.data.frame(rmdl1)
+res$rmdl2<-predict(RFmdl2,VAL)
+res$rmdl3<-predict(RFmdl3,VAL)
+print(res)
+```
+
+And now check the accuracy of the results
+```{r }
+a1<-1-sum(RFmdl1$confusion[,6])
+a2<-1-sum(RFmdl2$confusion[,6])
+a3<-max(RFmdl3$results$Accuracy)
+
+print(c(a1,a2,a3))
+```
+
+# 4. Conclusions
+
+The first model gives different results than the other two.
+Based on the accuracy of the models, we would select the last model over the other two
+
+# 5. References
+
+1. "Human activity recognition" [link](http://groupware.les.inf.puc-rio.br/har)
+
+2. "Qualitative activity recognition of weight lifting exercises" Velloso, Bulling, Gellersen, Ugulino, Fuks. 2013
+[link](http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201)
+
